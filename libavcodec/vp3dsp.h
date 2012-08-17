@@ -1,8 +1,4 @@
 /*
- * VDA HW acceleration
- *
- * copyright (c) 2011 Sebastien Zwickert
- *
  * This file is part of FFmpeg.
  *
  * FFmpeg is free software; you can redistribute it and/or
@@ -20,23 +16,25 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_VDA_INTERNAL_H
-#define AVCODEC_VDA_INTERNAL_H
+#ifndef AVCODEC_VP3DSP_H
+#define AVCODEC_VP3DSP_H
 
-#include "vda.h"
+#include <stdint.h>
+#include "dsputil.h"
 
-/**
- * \addtogroup VDA_Decoding
- *
- * @{
- */
+typedef struct VP3DSPContext {
+    void (*idct_put)(uint8_t *dest, int line_size, DCTELEM *block);
+    void (*idct_add)(uint8_t *dest, int line_size, DCTELEM *block);
+    void (*idct_dc_add)(uint8_t *dest, int line_size, const DCTELEM *block);
+    void (*v_loop_filter)(uint8_t *src, int stride, int *bounding_values);
+    void (*h_loop_filter)(uint8_t *src, int stride, int *bounding_values);
 
-/** Send frame data to the hardware decoder. */
-int ff_vda_decoder_decode(struct vda_context *vda_ctx,
-                          uint8_t *bitstream,
-                          int bitstream_size,
-                          int64_t frame_pts);
+    int idct_perm;
+} VP3DSPContext;
 
-/* @} */
+void ff_vp3dsp_init(VP3DSPContext *c, int flags);
+void ff_vp3dsp_init_arm(VP3DSPContext *c, int flags);
+void ff_vp3dsp_init_ppc(VP3DSPContext *c, int flags);
+void ff_vp3dsp_init_x86(VP3DSPContext *c, int flags);
 
-#endif /* AVCODEC_VDA_INTERNAL_H */
+#endif /* AVCODEC_VP3DSP_H */

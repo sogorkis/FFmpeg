@@ -521,6 +521,13 @@ static int planarRgbToRgbWrapper(SwsContext *c, const uint8_t *src[],
         || (x) == PIX_FMT_ABGR   \
         )
 
+#define isRGBA64(x) (                \
+           (x) == PIX_FMT_RGBA64LE   \
+        || (x) == PIX_FMT_RGBA64BE   \
+        || (x) == PIX_FMT_BGRA64LE   \
+        || (x) == PIX_FMT_BGRA64BE   \
+        )
+
 #define isRGB48(x) (                \
            (x) == PIX_FMT_RGB48LE   \
         || (x) == PIX_FMT_RGB48BE   \
@@ -561,11 +568,28 @@ static rgbConvFn findRgbConvFn(SwsContext *c)
         if      (CONV_IS(RGB48LE, BGR48LE)
               || CONV_IS(BGR48LE, RGB48LE)
               || CONV_IS(RGB48BE, BGR48BE)
-              || CONV_IS(BGR48BE, RGB48BE)) conv = rgb48tobgr48_LL;
+              || CONV_IS(BGR48BE, RGB48BE)) conv = rgb48tobgr48_nobswap;
         else if (CONV_IS(RGB48LE, BGR48BE)
               || CONV_IS(BGR48LE, RGB48BE)
               || CONV_IS(RGB48BE, BGR48LE)
-              || CONV_IS(BGR48BE, RGB48LE)) conv = rgb48tobgr48_LB;
+              || CONV_IS(BGR48BE, RGB48LE)) conv = rgb48tobgr48_bswap;
+    } else if (isRGBA64(srcFormat) && isRGB48(dstFormat)) {
+        if      (CONV_IS(RGBA64LE, BGR48LE)
+              || CONV_IS(BGRA64LE, RGB48LE)
+              || CONV_IS(RGBA64BE, BGR48BE)
+              || CONV_IS(BGRA64BE, RGB48BE)) conv = rgb64tobgr48_nobswap;
+        else if (CONV_IS(RGBA64LE, BGR48BE)
+              || CONV_IS(BGRA64LE, RGB48BE)
+              || CONV_IS(RGBA64BE, BGR48LE)
+              || CONV_IS(BGRA64BE, RGB48LE)) conv = rgb64tobgr48_bswap;
+        else if (CONV_IS(RGBA64LE, RGB48LE)
+              || CONV_IS(BGRA64LE, BGR48LE)
+              || CONV_IS(RGBA64BE, RGB48BE)
+              || CONV_IS(BGRA64BE, BGR48BE)) conv = rgb64to48_nobswap;
+        else if (CONV_IS(RGBA64LE, RGB48BE)
+              || CONV_IS(BGRA64LE, BGR48BE)
+              || CONV_IS(RGBA64BE, RGB48LE)
+              || CONV_IS(BGRA64BE, BGR48LE)) conv = rgb64to48_bswap;
     } else
     /* BGR -> BGR */
     if ((isBGRinInt(srcFormat) && isBGRinInt(dstFormat)) ||
@@ -806,7 +830,34 @@ static int planarCopyWrapper(SwsContext *c, const uint8_t *src[],
                         srcPtr  += srcStride[plane];
                     }
                 } else if (src_depth <= dst_depth) {
+                    int orig_length = length;
                     for (i = 0; i < height; i++) {
+                        if(isBE(c->srcFormat) == HAVE_BIGENDIAN &&
+                           isBE(c->dstFormat) == HAVE_BIGENDIAN &&
+                           shiftonly) {
+                             unsigned shift = dst_depth - src_depth;
+                             length = orig_length;
+#if HAVE_FAST_64BIT
+#define FAST_COPY_UP(shift) \
+    for (j = 0; j < length - 3; j += 4) { \
+        uint64_t v = AV_RN64A(srcPtr2 + j); \
+        AV_WN64A(dstPtr2 + j, v << shift); \
+    } \
+    length &= 3;
+#else
+#define FAST_COPY_UP(shift) \
+    for (j = 0; j < length - 1; j += 2) { \
+        uint32_t v = AV_RN32A(srcPtr2 + j); \
+        AV_WN32A(dstPtr2 + j, v << shift); \
+    } \
+    length &= 1;
+#endif
+                             switch (shift)
+                             {
+                             case 6: FAST_COPY_UP(6); break;
+                             case 7: FAST_COPY_UP(7); break;
+                             }
+                        }
 #define COPY_UP(r,w) \
     if(shiftonly){\
         for (j = 0; j < length; j++){ \

@@ -4,7 +4,7 @@
 *.def
 *.dll
 *.exe
-*.ho
+*.h.c
 *.lib
 *.pc
 *.so
@@ -15,6 +15,8 @@
 *_g
 /.config
 /.version
+/.project
+/.cproject
 /ffmpeg
 /ffplay
 /ffprobe

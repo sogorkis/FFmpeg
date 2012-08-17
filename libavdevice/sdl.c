@@ -98,7 +98,7 @@ static int sdl_write_header(AVFormatContext *s)
 
     if (   s->nb_streams > 1
         || encctx->codec_type != AVMEDIA_TYPE_VIDEO
-        || encctx->codec_id   != CODEC_ID_RAWVIDEO) {
+        || encctx->codec_id   != AV_CODEC_ID_RAWVIDEO) {
         av_log(s, AV_LOG_ERROR, "Only supports one rawvideo stream\n");
         ret = AVERROR(EINVAL);
         goto fail;
@@ -206,9 +206,9 @@ static int sdl_write_packet(AVFormatContext *s, AVPacket *pkt)
 #define OFFSET(x) offsetof(SDLContext,x)
 
 static const AVOption options[] = {
-    { "window_title", "SDL window title",           OFFSET(window_title),  AV_OPT_TYPE_STRING, {.str = NULL }, 0,  0, AV_OPT_FLAG_ENCODING_PARAM },
-    { "icon_title",   "SDL iconified window title", OFFSET(icon_title)  ,  AV_OPT_TYPE_STRING, {.str = NULL }, 0,  0, AV_OPT_FLAG_ENCODING_PARAM },
-    { "window_size",  "SDL window forced size",     OFFSET(window_width),  AV_OPT_TYPE_IMAGE_SIZE,{.str=NULL}, 0,  0, AV_OPT_FLAG_ENCODING_PARAM },
+    { "window_title", "set SDL window title",           OFFSET(window_title), AV_OPT_TYPE_STRING, {.str = NULL }, 0, 0, AV_OPT_FLAG_ENCODING_PARAM },
+    { "icon_title",   "set SDL iconified window title", OFFSET(icon_title)  , AV_OPT_TYPE_STRING, {.str = NULL }, 0, 0, AV_OPT_FLAG_ENCODING_PARAM },
+    { "window_size",  "set SDL window forced size",     OFFSET(window_width), AV_OPT_TYPE_IMAGE_SIZE,{.str=NULL}, 0, 0, AV_OPT_FLAG_ENCODING_PARAM },
     { NULL },
 };
 
@@ -223,8 +223,8 @@ AVOutputFormat ff_sdl_muxer = {
     .name           = "sdl",
     .long_name      = NULL_IF_CONFIG_SMALL("SDL output device"),
     .priv_data_size = sizeof(SDLContext),
-    .audio_codec    = CODEC_ID_NONE,
-    .video_codec    = CODEC_ID_RAWVIDEO,
+    .audio_codec    = AV_CODEC_ID_NONE,
+    .video_codec    = AV_CODEC_ID_RAWVIDEO,
     .write_header   = sdl_write_header,
     .write_packet   = sdl_write_packet,
     .write_trailer  = sdl_write_trailer,

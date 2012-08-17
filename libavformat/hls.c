@@ -420,8 +420,6 @@ reload:
     ret = ffurl_read(v->input, buf, buf_size);
     if (ret > 0)
         return ret;
-    if (ret < 0 && ret != AVERROR_EOF)
-        return ret;
     ffurl_close(v->input);
     v->input = NULL;
     v->cur_seq_no++;
@@ -429,7 +427,7 @@ reload:
     c->end_of_segment = 1;
     c->cur_seq_no = v->cur_seq_no;
 
-    if (v->ctx && v->ctx->nb_streams) {
+    if (v->ctx && v->ctx->nb_streams && v->parent->nb_streams >= v->stream_offset + v->ctx->nb_streams) {
         v->needed = 0;
         for (i = v->stream_offset; i < v->stream_offset + v->ctx->nb_streams;
              i++) {
@@ -528,7 +526,12 @@ static int hls_read_header(AVFormatContext *s)
         ret = avformat_open_input(&v->ctx, v->segments[0]->url, in_fmt, NULL);
         if (ret < 0)
             goto fail;
+
         v->stream_offset = stream_offset;
+        v->ctx->ctx_flags &= ~AVFMTCTX_NOHEADER;
+        ret = avformat_find_stream_info(v->ctx, NULL);
+        if (ret < 0)
+            goto fail;
         snprintf(bitrate_str, sizeof(bitrate_str), "%d", v->bandwidth);
         /* Create new AVStreams for each stream in this variant */
         for (j = 0; j < v->ctx->nb_streams; j++) {
@@ -746,7 +749,7 @@ static int hls_probe(AVProbeData *p)
 
 AVInputFormat ff_hls_demuxer = {
     .name           = "hls,applehttp",
-    .long_name      = NULL_IF_CONFIG_SMALL("Apple HTTP Live Streaming format"),
+    .long_name      = NULL_IF_CONFIG_SMALL("Apple HTTP Live Streaming"),
     .priv_data_size = sizeof(HLSContext),
     .read_probe     = hls_probe,
     .read_header    = hls_read_header,

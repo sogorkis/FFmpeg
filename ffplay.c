@@ -1980,7 +1980,7 @@ static int audio_decode_frame(VideoState *is, double *pts_ptr)
             }
 
             if (is->swr_ctx) {
-                const uint8_t *in[] = { is->frame->data[0] };
+                const uint8_t **in = (const uint8_t **)is->frame->extended_data;
                 uint8_t *out[] = {is->audio_buf2};
                 int out_count = sizeof(is->audio_buf2) / is->audio_tgt.channels / av_get_bytes_per_sample(is->audio_tgt.fmt);
                 if (wanted_nb_samples != is->frame->nb_samples) {
@@ -2098,7 +2098,7 @@ static int audio_open(void *opaque, int64_t wanted_channel_layout, int wanted_nb
 
     env = SDL_getenv("SDL_AUDIO_CHANNELS");
     if (env) {
-        wanted_nb_channels = SDL_atoi(env);
+        wanted_nb_channels = atoi(env);
         wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
     }
     if (!wanted_channel_layout || wanted_nb_channels != av_get_channel_layout_nb_channels(wanted_channel_layout)) {

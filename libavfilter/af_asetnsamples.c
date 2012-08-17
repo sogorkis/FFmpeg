@@ -62,10 +62,8 @@ static av_cold int init(AVFilterContext *ctx, const char *args)
     asns->class = &asetnsamples_class;
     av_opt_set_defaults(asns);
 
-    if ((err = av_set_options_string(asns, args, "=", ":")) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Error parsing options string: '%s'\n", args);
+    if ((err = av_set_options_string(asns, args, "=", ":")) < 0)
         return err;
-    }
 
     asns->next_out_pts = AV_NOPTS_VALUE;
     av_log(ctx, AV_LOG_VERBOSE, "nb_out_samples:%d pad:%d\n", asns->nb_out_samples, asns->pad);
@@ -153,7 +151,7 @@ static int filter_samples(AVFilterLink *inlink, AVFilterBufferRef *insamples)
         asns->next_out_pts = insamples->pts;
     avfilter_unref_buffer(insamples);
 
-    if (av_audio_fifo_size(asns->fifo) >= asns->nb_out_samples)
+    while (av_audio_fifo_size(asns->fifo) >= asns->nb_out_samples)
         push_samples(outlink);
     return 0;
 }
