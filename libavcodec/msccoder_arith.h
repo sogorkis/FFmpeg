@@ -1,4 +1,7 @@
 /*
+ * Arithmetic coder. Based on Mark Nelson article: "Arithmetic Coding
+ * + Statistical Modeling = Data Compression".
+ *
  * Listing 1 -- coder.h
  *
  * This header file contains the constants, declarations, and
@@ -28,7 +31,7 @@ typedef struct {
                 unsigned short int low_count;
                 unsigned short int high_count;
                 unsigned short int scale;
-               } MSC_CODER_ARITH_SYMBOL;
+               } MscCoderArithSymbol;
 
 extern long underflow_bits;    /* The present underflow count in  */
                                /* the arithmetic coder.           */
@@ -36,10 +39,10 @@ extern long underflow_bits;    /* The present underflow count in  */
  * Function prototypes.
  */
 void initialize_arithmetic_decoder( GetBitContext *bitContext );
-void remove_symbol_from_stream( GetBitContext *bitContext, MSC_CODER_ARITH_SYMBOL *s );
+void remove_symbol_from_stream( GetBitContext *bitContext, MscCoderArithSymbol *s );
 void initialize_arithmetic_encoder( void );
-void encode_symbol( PutBitContext *bitContext, MSC_CODER_ARITH_SYMBOL *s );
+void encode_symbol( PutBitContext *bitContext, MscCoderArithSymbol *s );
 void flush_arithmetic_encoder( PutBitContext *bitContext );
-short int get_current_count( MSC_CODER_ARITH_SYMBOL *s );
+short int get_current_count( MscCoderArithSymbol *s );
 
 #endif /* MSCCODER_ARITH_H */

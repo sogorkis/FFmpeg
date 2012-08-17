@@ -1,4 +1,7 @@
 /*
+ * Arithmetic coder. Based on Mark Nelson article: "Arithmetic Coding
+ * + Statistical Modeling = Data Compression".
+ *
  * Listing 2 -- coder.c
  *
  * This file contains the code needed to accomplish arithmetic
@@ -51,7 +54,7 @@ void initialize_arithmetic_encoder()
  * the output stream.  Finally, high and low are stable again and
  * the routine returns.
  */
-void encode_symbol( PutBitContext *bitContext, MSC_CODER_ARITH_SYMBOL *s )
+void encode_symbol( PutBitContext *bitContext, MscCoderArithSymbol *s )
 {
 	long range;
 	unsigned int value;
@@ -125,7 +128,7 @@ void flush_arithmetic_encoder( PutBitContext *bitContext )
  *
  *  code = count / s->scale
  */
-short int get_current_count( MSC_CODER_ARITH_SYMBOL *s )
+short int get_current_count( MscCoderArithSymbol *s )
 {
 	long range;
 	short int count;
@@ -163,7 +166,7 @@ void initialize_arithmetic_decoder( GetBitContext *bitContext )
  * decoded, this routine has to be called to remove it from the
  * input stream.
  */
-void remove_symbol_from_stream( GetBitContext *bitContext, MSC_CODER_ARITH_SYMBOL *s )
+void remove_symbol_from_stream( GetBitContext *bitContext, MscCoderArithSymbol *s )
 {
 	long range;
 

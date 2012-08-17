@@ -1,4 +1,7 @@
 /*
+ * Arithmetic coder. Based on Mark Nelson article: "Arithmetic Coding
+ * + Statistical Modeling = Data Compression".
+ *
  * Listing 9 -- model-1.c
  *
  * This is the modeling module for an order 0 fixed context
@@ -67,7 +70,7 @@ void update_model( int symbol )
  * int, but it is not used in this routine.  The return value
  * from convert_int_to_symbol is used in model-2.c.
  */
-int convert_int_to_symbol( int c, MSC_CODER_ARITH_SYMBOL *s )
+int convert_int_to_symbol( int c, MscCoderArithSymbol *s )
 {
     s->scale = totals[ 256 ];
     s->low_count = totals[ c ];
@@ -78,7 +81,7 @@ int convert_int_to_symbol( int c, MSC_CODER_ARITH_SYMBOL *s )
 /*
  * Getting the scale for the current context is easy.
  */
-void get_symbol_scale( MSC_CODER_ARITH_SYMBOL *s )
+void get_symbol_scale( MscCoderArithSymbol *s )
 {
     s->scale = totals[ 256 ];
 }
@@ -90,7 +93,7 @@ void get_symbol_scale( MSC_CODER_ARITH_SYMBOL *s )
  * high count and low count is so that symbol can be properly removed
  * from the arithmetic coded input.
  */
-int convert_symbol_to_int( int count, MSC_CODER_ARITH_SYMBOL *s)
+int convert_symbol_to_int( int count, MscCoderArithSymbol *s)
 {
     int c;
 

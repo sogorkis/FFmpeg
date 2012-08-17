@@ -1,4 +1,7 @@
 /*
+ * Arithmetic coder. Based on Mark Nelson article: "Arithmetic Coding
+ * + Statistical Modeling = Data Compression".
+ *
  * Listing 8 -- model.h
  *
  * This file contains all of the function prototypes and
@@ -21,9 +24,9 @@ extern int flushing_enabled;
  */
 void initialize_model( void );
 void update_model( int symbol );
-int convert_int_to_symbol( int symbol, MSC_CODER_ARITH_SYMBOL *s );
-void get_symbol_scale( MSC_CODER_ARITH_SYMBOL *s );
-int convert_symbol_to_int( int count, MSC_CODER_ARITH_SYMBOL *s );
+int convert_int_to_symbol( int symbol, MscCoderArithSymbol *s );
+void get_symbol_scale( MscCoderArithSymbol *s );
+int convert_symbol_to_int( int count, MscCoderArithSymbol *s );
 void add_character_to_model( int c );
 void flush_model( void );
 
