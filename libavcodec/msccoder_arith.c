@@ -57,7 +57,6 @@ void initialize_arithmetic_encoder()
 void encode_symbol( PutBitContext *bitContext, MscCoderArithSymbol *s )
 {
 	long range;
-	unsigned int value;
 	/*
 	 * These three lines rescale high and low for the new symbol.
 	 */
@@ -78,11 +77,9 @@ void encode_symbol( PutBitContext *bitContext, MscCoderArithSymbol *s )
 		 */
 		if ( ( high & 0x8000 ) == ( low & 0x8000 ) )
 		{
-			// output_bit( stream,  high & 0x8000); TODO: verify
 			put_bits(bitContext, 1, ZERO_ONE(high & 0x8000));
 			while ( underflow_bits > 0 )
 			{
-				// output_bit( stream, ~high & 0x8000 ); TODO: verify
 				put_bits(bitContext, 1, ZERO_ONE(~high & 0x8000));
 				underflow_bits--;
 			}
@@ -112,11 +109,9 @@ void encode_symbol( PutBitContext *bitContext, MscCoderArithSymbol *s )
  */
 void flush_arithmetic_encoder( PutBitContext *bitContext )
 {
-	// output_bit( stream, low & 0x4000 ); TODO: verify
 	put_bits(bitContext, 1, ZERO_ONE(low & 0x4000));
 	underflow_bits++;
 	while ( underflow_bits-- > 0 )
-		// output_bit( stream, ~low & 0x4000 ); TODO: verify
 		put_bits(bitContext, 1, ZERO_ONE(~low & 0x4000));
 }
 
@@ -153,7 +148,6 @@ void initialize_arithmetic_decoder( GetBitContext *bitContext )
 	for ( i = 0 ; i < 16 ; i++ )
 	{
 		code <<= 1;
-		// input_bit( stream ); TODO: verify
 		code += get_bits1(bitContext);
 	}
 	low = 0;
@@ -207,7 +201,6 @@ void remove_symbol_from_stream( GetBitContext *bitContext, MscCoderArithSymbol *
 		high <<= 1;
 		high |= 1;
 		code <<= 1;
-//		code += input_bit( stream ); TODO: verify
 		code += get_bits1(bitContext);
 	}
 }

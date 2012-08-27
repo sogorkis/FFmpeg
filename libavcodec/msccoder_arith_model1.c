@@ -20,22 +20,22 @@
 #include "msccoder_arith_model.h"
 
 /*
- * In order to create an array with indices -1 through 256, I have
- * to do this funny declaration.  totals[-1] == storage[0].
- */
-short int storage[ 258 ];
-short int *totals = storage + 1;
-
-/*
  * When the model is first started up, each symbols has a count of
  * 1, which means a low value of c+1, and a high value of c+2.
  */
-void initialize_model()
+void initialize_model( MscCoderArithModel * m, int bits )
 {
     short int i;
 
-    for ( i = -1 ; i <= 256 ; i++ )
-        totals[ i ] = i + 1;
+    m->length = pow(2, bits);
+
+    m->storage = av_malloc((m->length + 2) * sizeof(short int));
+
+    m->totals = m->storage + 1;
+
+    for ( i = -1 ; i <= m->length ; i++ )
+        m->totals[ i ] = i + 1;
+
 }
 
 /*
@@ -45,20 +45,23 @@ void initialize_model()
  * the maximum value, we need to rescale.  Fortunately, the rescale
  * operation is relatively rare.
  */
-void update_model( int symbol )
+void update_model( MscCoderArithModel * m, int symbol )
 {
     int i;
+    short int *totals;
 
-    for ( symbol++ ; symbol <= 256; symbol++ )
+    totals = m->totals;
+
+    for ( symbol++ ; symbol <= m->length; symbol++ )
         totals[ symbol ]++;
-    if ( totals[ 256 ] == MSC_CODER_ARITH_MAXIMUM_SCALE )
+    if ( totals[ m->length ] == MSC_CODER_ARITH_MAXIMUM_SCALE )
     {
-        for ( i = 0 ; i <= 256 ; i++ )
-	{
+        for ( i = 0 ; i <= m->length ; i++ )
+        {
             totals[ i ] /= 2;
             if ( totals[ i ] <= totals[ i-1 ] )
                 totals[ i ] = totals[ i-1 ] + 1;
-	}
+        }
     }
 }
 
@@ -70,20 +73,20 @@ void update_model( int symbol )
  * int, but it is not used in this routine.  The return value
  * from convert_int_to_symbol is used in model-2.c.
  */
-int convert_int_to_symbol( int c, MscCoderArithSymbol *s )
+int convert_int_to_symbol( MscCoderArithModel * m, int c, MscCoderArithSymbol *s )
 {
-    s->scale = totals[ 256 ];
-    s->low_count = totals[ c ];
-    s->high_count = totals[ c+1 ];
+    s->scale = m->totals[ m->length ];
+    s->low_count = m->totals[ c ];
+    s->high_count = m->totals[ c+1 ];
     return( 0 );
 }
 
 /*
  * Getting the scale for the current context is easy.
  */
-void get_symbol_scale( MscCoderArithSymbol *s )
+void get_symbol_scale( MscCoderArithModel * m, MscCoderArithSymbol *s )
 {
-    s->scale = totals[ 256 ];
+    s->scale = m->totals[ m->length ];
 }
 
 /*
@@ -93,13 +96,17 @@ void get_symbol_scale( MscCoderArithSymbol *s )
  * high count and low count is so that symbol can be properly removed
  * from the arithmetic coded input.
  */
-int convert_symbol_to_int( int count, MscCoderArithSymbol *s)
+int convert_symbol_to_int( MscCoderArithModel * m, int count, MscCoderArithSymbol *s)
 {
     int c;
 
-    for ( c = 255; count < totals[ c ] ; c-- )
+    for ( c = m->length; count < m->totals[ c ] ; c-- )
 	;
-    s->high_count = totals[ c+1 ];
-    s->low_count = totals[ c ];
+    s->high_count = m->totals[ c+1 ];
+    s->low_count = m->totals[ c ];
     return( c );
+}
+
+void free_model(MscCoderArithModel * m) {
+	av_free(m->storage);
 }

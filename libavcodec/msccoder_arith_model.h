@@ -19,14 +19,26 @@
  */
 extern int max_order;
 extern int flushing_enabled;
+
+typedef struct MscCoderArithModel {
+	/*
+	 * In order to create an array with indices -1 through 256, I have
+	 * to do this funny declaration.  totals[-1] == storage[0].
+	 */
+	short int *storage;
+	short int *totals;
+	int length;
+} MscCoderArithModel;
+
 /*
  * Prototypes for routines that can be called from MODEL-X.C
  */
-void initialize_model( void );
-void update_model( int symbol );
-int convert_int_to_symbol( int symbol, MscCoderArithSymbol *s );
-void get_symbol_scale( MscCoderArithSymbol *s );
-int convert_symbol_to_int( int count, MscCoderArithSymbol *s );
+void initialize_model( MscCoderArithModel * m, int bits );
+void update_model( MscCoderArithModel * m, int symbol );
+int convert_int_to_symbol( MscCoderArithModel * m, int symbol, MscCoderArithSymbol *s );
+void get_symbol_scale( MscCoderArithModel * m, MscCoderArithSymbol *s );
+int convert_symbol_to_int( MscCoderArithModel * m, int count, MscCoderArithSymbol *s );
+void free_model(MscCoderArithModel * m);
 void add_character_to_model( int c );
 void flush_model( void );
 

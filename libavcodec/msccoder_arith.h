@@ -18,7 +18,6 @@
 #include "get_bits.h"
 
 #define MSC_CODER_ARITH_MAXIMUM_SCALE   16383  /* Maximum allowed frequency count */
-#define MSC_CODER_ARITH_ESCAPE          256    /* The escape symbol               */
 #define MSC_CODER_ARITH_DONE            -1     /* The output stream empty  symbol */
 #define MSC_CODER_ARITH_FLUSH           -2     /* The symbol to flush the model   */
 
