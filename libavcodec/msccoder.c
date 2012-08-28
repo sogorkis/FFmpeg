@@ -1,67 +1,40 @@
 #include "msccoder.h"
 #include "avcodec.h"
 #include "rle.h"
+#include "mpeg12data.h"
 
 #include "libavutil/log.h"
 #include "libavutil/imgutils.h"
 
 const int ARITH_CODER_BITS = 9;
 
-static int is_key_frame(int frameIndex) {
-	return frameIndex % 25 == 0 ? 1 : 0;
-}
+static const uint8_t scantab[64]={
+    0x00,0x08,0x01,0x09,0x10,0x18,0x11,0x19,
+    0x02,0x0A,0x03,0x0B,0x12,0x1A,0x13,0x1B,
+    0x04,0x0C,0x05,0x0D,0x20,0x28,0x21,0x29,
+    0x06,0x0E,0x07,0x0F,0x14,0x1C,0x15,0x1D,
+    0x22,0x2A,0x23,0x2B,0x30,0x38,0x31,0x39,
+    0x16,0x1E,0x17,0x1F,0x24,0x2C,0x25,0x2D,
+    0x32,0x3A,0x33,0x3B,0x26,0x2E,0x27,0x2F,
+    0x34,0x3C,0x35,0x3D,0x36,0x3E,0x37,0x3F,
+};
 
-/*
- * Initialize arithmetic coder models. First model: arithModels[0],
- * can store 0, 1 values (2^1). Second one arithModels[1], 0, 1, 2, 3
- * (2^2) and so on.
- */
-void init_arith_models(MscCoderArithModel arithModels[10], int arithModelAddValue[10]) {
+void init_common(AVCodecContext *avctx, MscCodecContext *mscContext) {
+
+	ff_dsputil_init(&mscContext->dsp, avctx);
+
+	mscContext->mb_width   = (avctx->width  + 15) / 16;
+	mscContext->mb_height  = (avctx->height + 15) / 16;
+
+	/*
+	 * Initialize arithmetic coder models. First model: arithModels[0],
+	 * can store 0, 1 values (2^1). Second one arithModels[1], 0, 1, 2, 3
+	 * (2^2) and so on.
+	 */
 	for (int i = 0; i < 10; ++i) {
-		initialize_model(&arithModels[i], i + 1);
-		arithModelAddValue[i] = pow(2, i) - 1;
-
+		initialize_model(&mscContext->arithModels[i], i + 1);
+		mscContext->arithModelAddValue[i] = pow(2, i) - 1;
 	}
-}
-
-void init_mpeg_context(AVCodecContext *avctx, MpegEncContext *m) {
-	enum CodecID codecId;
-	void *privData;
-
-	codecId = avctx->codec_id;
-	m->avctx = avctx;
-	privData = avctx->priv_data;
-
-	m->qscale= 8;
-
-	avctx->codec_id =
-	avctx->codec->id = AV_CODEC_ID_MPEG1VIDEO;
-
-	avctx->priv_data = m;
-	ff_MPV_encode_init(avctx);
-
-	avctx->codec_id =
-	avctx->codec->id = codecId;
-
-	avctx->priv_data = privData;
-
-	m->dct_unquantize_intra = m->dct_unquantize_mpeg1_intra;
-	m->dct_unquantize_inter = m->dct_unquantize_mpeg1_inter;
-
-	m->min_qcoeff = -511;
-	m->max_qcoeff = 511;
-
-	for(int i=1; i < 64; i++) {
-		int j= m->dsp.idct_permutation[i];
-
-		m->intra_matrix[j] = av_clip_uint8((ff_mpeg1_default_intra_matrix[i] * m->qscale) >> 3);
-	}
-	m->y_dc_scale_table=
-	m->c_dc_scale_table= ff_mpeg2_dc_scale_table[m->intra_dc_precision];
-	m->intra_matrix[0] = ff_mpeg2_dc_scale_table[m->intra_dc_precision][8];
-	ff_convert_matrix(&m->dsp, m->q_intra_matrix, m->q_intra_matrix16,
-			m->intra_matrix, m->intra_quant_bias, 8, 8, 1);
-	m->qscale= 8;
 }
 
 static void print_debug_block(AVCodecContext *avctx, DCTELEM *block) {
@@ -74,7 +47,7 @@ static void print_debug_block(AVCodecContext *avctx, DCTELEM *block) {
 	}
 }
 
-static void print_debug_int(AVCodecContext *avctx, int * block) {
+static void print_debug_int(AVCodecContext *avctx, uint16_t * block) {
 	av_log(avctx, AV_LOG_INFO, "\n ");
 	for (int i = 0; i < 64;) {
 		av_log(avctx, AV_LOG_INFO, "%3d ", block[i++]);
@@ -84,10 +57,107 @@ static void print_debug_int(AVCodecContext *avctx, int * block) {
 	}
 }
 
-static int decode_init(AVCodecContext *avctx) {
-	MscDecoderContext * mscContext;
+static int quantize(DCTELEM *block, int *q_intra_matrix) {
+	int lastNonZeroElement = -1;
 
+	for (int i = 63; i > 0; --i) {
+		const int index	= scantab[i];
+		block[index]	= (block[index] * q_intra_matrix[index] + (1 << 15)) >> 16;
+
+		if (lastNonZeroElement < 0 && block[index] != 0) {
+			lastNonZeroElement = i;
+		}
+	}
+
+	block[0] = (block[0] + 32) >> 6;
+
+	return lastNonZeroElement;
+}
+
+static void dequantize(DCTELEM *block, MscCodecContext *mscContext) {
+	DECLARE_ALIGNED(16, DCTELEM, tmp)[64];
+	DCTELEM firstElemValue;
+
+	firstElemValue = 8 * block[0];
+	block[0] = 0;
+
+	for (int i = 0; i < 64; ++i) {
+		const int index	= scantab[i];
+		tmp[mscContext->scantable.permutated[i]]= (block[index] * mscContext->intra_matrix[i]) >> 4;
+	}
+
+	tmp[0] = firstElemValue;
+	for (int i = 0; i < 64; ++i) {
+		block[i] = tmp[i];
+	}
+}
+
+static int decode_init(AVCodecContext *avctx) {
+	MscDecoderContext * mscDecoderContext;
+	MscCodecContext * mscContext;
+	AVFrame * p;
+	const int scale = 1;
+
+	mscDecoderContext	= avctx->priv_data;
+	mscContext			= &mscDecoderContext->mscContext;
+
+	init_common(avctx, &mscDecoderContext->mscContext);
+
+	ff_init_scantable(mscContext->dsp.idct_permutation, &mscContext->scantable, scantab);
 	avctx->pix_fmt = PIX_FMT_YUV420P;
+
+	mscContext->inv_qscale = 8;
+
+	for(int i = 0; i < 64; i++){
+		int index= scantab[i];
+
+		mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_intra_matrix[index] / mscContext->inv_qscale;
+	}
+
+	print_debug_int(avctx, mscContext->intra_matrix);
+
+	// allocate frame
+	p = avctx->coded_frame = avcodec_alloc_frame();
+	if (!avctx->coded_frame) {
+		av_log(avctx, AV_LOG_ERROR, "Could not allocate frame.\n");
+		return AVERROR(ENOMEM);
+	}
+
+	p->qstride		= mscContext->mb_width;
+	p->qscale_table	= av_malloc( p->qstride * mscContext->mb_height);
+	p->quality		= (32 * scale + mscContext->inv_qscale / 2) / mscContext->inv_qscale;
+	memset(p->qscale_table, p->quality, p->qstride * mscContext->mb_height);
+
+	// allocate buffer
+	mscDecoderContext->buffSize	= 6 * avctx->coded_width * avctx->coded_height;
+	mscDecoderContext->buff		= av_malloc(mscDecoderContext->buffSize);
+
+	if (!mscDecoderContext->buff) {
+		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
+		return AVERROR(ENOMEM);
+	}
+
+	return 0;
+}
+
+static int encode_init(AVCodecContext *avctx) {
+	MscEncoderContext * mscEncoderContext;
+	MscCodecContext * mscContext;
+	const int scale = 1;
+
+	mscEncoderContext	= avctx->priv_data;
+	mscContext			= &mscEncoderContext->mscContext;
+
+	init_common(avctx, &mscEncoderContext->mscContext);
+
+	if(avctx->global_quality == 0) avctx->global_quality= 4*FF_QUALITY_SCALE;
+
+	mscContext->inv_qscale = (32*scale*FF_QUALITY_SCALE +  avctx->global_quality/2) / avctx->global_quality;
+
+	for(int i = 0; i < 64; i++) {
+		int q= 32*scale*ff_mpeg1_default_intra_matrix[i];
+		mscContext->q_intra_matrix[i]= ((mscContext->inv_qscale << 16) + q/2) / q;
+	}
 
 	// allocate frame
 	avctx->coded_frame = avcodec_alloc_frame();
@@ -96,52 +166,44 @@ static int decode_init(AVCodecContext *avctx) {
 		return AVERROR(ENOMEM);
 	}
 
-	mscContext = avctx->priv_data;
+	// allocate buffers
+	mscEncoderContext->rleBuffSize		= 3 * avctx->coded_width;
+	mscEncoderContext->arithBuffSize	= 6 * avctx->coded_width * avctx->coded_height;
+	mscEncoderContext->rleBuff			= av_malloc(mscEncoderContext->rleBuffSize);
+	mscEncoderContext->arithBuff		= av_malloc(mscEncoderContext->arithBuffSize);
 
-	// initialize arithmetic coder models
-	init_arith_models(mscContext->arithModels, mscContext->arithModelAddValue);
-
-	// allocate buffer
-	mscContext->buffSize	= 6 * avctx->coded_width * avctx->coded_height;
-	mscContext->buff		= av_malloc(mscContext->buffSize);
-
-	if (!mscContext->buff) {
-		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
+	if (mscEncoderContext->rleBuff == NULL || mscEncoderContext->arithBuff == NULL) {
+		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffers.\n");
 		return AVERROR(ENOMEM);
 	}
-
-	init_mpeg_context(avctx, &mscContext->m);
 
 	return 0;
 }
 
-
 static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPacket *avpkt) {
 	AVFrame *frame = avctx->coded_frame;
 	uint32_t rleBytesEncoded;
-	MscDecoderContext * mscContext;
-	MpegEncContext *m;
+	MscDecoderContext * mscDecoderContext;
+	MscCodecContext * mscContext;
 	GetBitContext gb;
 	MscCoderArithSymbol arithSymbol;
 	uint32_t count, value;
-	int qscale;
 
-	mscContext = avctx->priv_data;
-
-	m = &mscContext->m;
+	mscDecoderContext = avctx->priv_data;
+	mscContext = &mscDecoderContext->mscContext;
 
 	if (frame->data[0]) {
 		avctx->release_buffer(avctx, frame);
 	}
 
 	frame->reference = 0;
-	frame->key_frame = 1;
-	frame->pict_type = AV_PICTURE_TYPE_I;
-
 	if (avctx->get_buffer(avctx, frame) < 0) {
 		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
 		return AVERROR(ENOMEM);
 	}
+
+	frame->key_frame = 1;
+	frame->pict_type = AV_PICTURE_TYPE_I;
 
 	// read header
 	memcpy(&rleBytesEncoded, avpkt->data, 4);
@@ -151,12 +213,8 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 
 	initialize_arithmetic_decoder(&gb);
 
-	qscale = 2;
-
-	m->mb_intra = 0;
-
-	for (int mb_x = 0; mb_x < m->mb_width; mb_x++) {
-		for (int mb_y = 0; mb_y < m->mb_height; mb_y++) {
+	for (int mb_x = 0; mb_x < mscContext->mb_width; mb_x++) {
+		for (int mb_y = 0; mb_y < mscContext->mb_height; mb_y++) {
 
 			for (int n = 0; n < 6; ++n) {
 
@@ -182,18 +240,24 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 					print_debug_block(avctx, mscContext->block[n]);
 				}
 
-				m->dct_unquantize_inter(m, mscContext->block[n], n, qscale);
-				m->dsp.idct(mscContext->block[n]);
+				dequantize(mscContext->block[n], mscContext);
 
 				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-					av_log(avctx, AV_LOG_INFO, "IDCT x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+					av_log(avctx, AV_LOG_INFO, "Dequantized x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
 					print_debug_block(avctx, mscContext->block[n]);
 				}
 			}
 
-			put_block(mscContext, frame, mb_x, mb_y);
+			idct_put_block(mscDecoderContext, frame, mb_x, mb_y);
+
+			if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+				av_log(avctx, AV_LOG_INFO, "IDCT x=%d, y=%d, n=%d\n", mb_x, mb_y, 0);
+				print_debug_block(avctx, mscContext->block[0]);
+			}
 		}
 	}
+
+	emms_c();
 
 	*outdata_size = sizeof(AVFrame);
 	*(AVFrame *) outdata = *frame;
@@ -214,116 +278,52 @@ static int decode_close(AVCodecContext *avctx) {
 	return 0;
 }
 
-static int encode_init(AVCodecContext *avctx) {
-	MscEncoderContext * mscContext;
-
-	// allocate frame
-	avctx->coded_frame = avcodec_alloc_frame();
-	if (!avctx->coded_frame) {
-		av_log(avctx, AV_LOG_ERROR, "Could not allocate frame.\n");
-		return AVERROR(ENOMEM);
-	}
-
-	mscContext = avctx->priv_data;
-
-	// allocate buffers
-	mscContext->rleBuffSize		= 3 * avctx->coded_width;
-	mscContext->arithBuffSize	= 6 * avctx->coded_width * avctx->coded_height;
-	mscContext->rleBuff			= av_malloc(mscContext->rleBuffSize);
-	mscContext->arithBuff		= av_malloc(mscContext->arithBuffSize);
-
-	if (mscContext->rleBuff == NULL || mscContext->arithBuff == NULL) {
-		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffers.\n");
-		return AVERROR(ENOMEM);
-	}
-
-	// initialize arithmetic coder model
-	init_arith_models(mscContext->arithModels, mscContext->arithModelAddValue);
-
-	init_mpeg_context(avctx, &mscContext->m);
-
-	return 0;
-}
-
-static inline void clip_coeffs(MpegEncContext *s, DCTELEM *block,
-                               int last_index)
-{
-    int i;
-    const int maxlevel = s->max_qcoeff;
-    const int minlevel = s->min_qcoeff;
-    int overflow = 0;
-
-    if (s->mb_intra) {
-        i = 1; // skip clipping of intra dc
-    } else
-        i = 0;
-
-    for (; i <= last_index; i++) {
-        const int j =  s->intra_scantable.permutated[i];
-        int level = block[j];
-
-        if (level > maxlevel) {
-            level = maxlevel;
-            overflow++;
-        } else if (level < minlevel) {
-            level = minlevel;
-            overflow++;
-        }
-
-        block[j] = level;
-    }
-}
-
-
 static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *frame, int *got_packet_ptr) {
-	MscEncoderContext * mscContext;
-	MpegEncContext *m;
+	MscEncoderContext * mscEncoderContext;
+	MscCodecContext * mscContext;
 	uint32_t rleBytesEncoded, arithBytesEncoded;
-	int retCode, isKeyFrame;
+	int retCode;
 	PutBitContext pb;
-	int mb_y, mb_x, qscale, value;
+	int mb_y, mb_x, value;
 	MscCoderArithSymbol arithSymbol;
 
 	// initialize arithmetic encoder registers
 	initialize_arithmetic_encoder();
 
-	mscContext = avctx->priv_data;
+	mscEncoderContext = avctx->priv_data;
+	mscContext = &mscEncoderContext->mscContext;
 
-	init_put_bits(&pb, mscContext->arithBuff, mscContext->arithBuffSize);
+	init_put_bits(&pb, mscEncoderContext->arithBuff, mscEncoderContext->arithBuffSize);
 
-	isKeyFrame = is_key_frame(avctx->frame_number);
+	avctx->coded_frame->reference = 0;
+	avctx->coded_frame->key_frame = 1;
+	avctx->coded_frame->pict_type = AV_PICTURE_TYPE_I;
 
-	avctx->coded_frame->reference = 0; // TODO: is this really necessary to set???
-	avctx->coded_frame->key_frame = isKeyFrame ? 1 : 0;
-	avctx->coded_frame->pict_type = isKeyFrame ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_P;
+	for (mb_x = 0; mb_x < mscContext->mb_width; mb_x++) {
+		for (mb_y = 0; mb_y < mscContext->mb_height; mb_y++) {
+			get_blocks(mscEncoderContext, frame, mb_x, mb_y);
 
-	m = &mscContext->m;
-
-	qscale = 2;
-
-	m->mb_intra = 0;
-
-//	print_debug_int(avctx, m->q_intra_matrix[2]);
-//	print_debug_int(avctx, m->q_chroma_intra_matrix[2]);
-
-	for (mb_x = 0; mb_x < m->mb_width; mb_x++) {
-		for (mb_y = 0; mb_y < m->mb_height; mb_y++) {
-			get_blocks(mscContext, frame, mb_x, mb_y);
-
-			for (int n = 0, overflow = 0; n < 6; ++n) {
+			for (int n = 0; n < 6; ++n) {
 
 				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
 					av_log(avctx, AV_LOG_INFO, "Block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
 					print_debug_block(avctx, mscContext->block[n]);
 				}
 
-				m->block_last_index[n] = m->dct_quantize(m, mscContext->block[n], n, qscale, &overflow);
+				mscContext->dsp.fdct(mscContext->block[n]);
 
-				if (overflow) {
-					clip_coeffs(m, m->block[n], m->block_last_index[n]);
-					av_log(avctx, AV_LOG_WARNING, "Overflow detected, frame: %d, mb_x: %d, mb_y: %d, n: %d\n",
-							avctx->frame_number, mb_x, mb_y, n);
+				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+					av_log(avctx, AV_LOG_INFO, "DCT block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+					print_debug_block(avctx, mscContext->block[n]);
 				}
+
+				quantize(mscContext->block[n], mscContext->q_intra_matrix);
+
+//				if (overflow) {
+//					clip_coeffs(m, m->block[n], m->block_last_index[n]);
+//					av_log(avctx, AV_LOG_WARNING, "Overflow detected, frame: %d, mb_x: %d, mb_y: %d, n: %d\n",
+//							avctx->frame_number, mb_x, mb_y, n);
+//				}
 
 				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
 					av_log(avctx, AV_LOG_INFO, "DCT quantized block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
@@ -347,6 +347,8 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 		}
 	}
 
+	emms_c();
+
 	// flush arithmetic encoder
 	flush_arithmetic_encoder(&pb);
 	flush_put_bits(&pb);
@@ -364,42 +366,44 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 	memcpy(avpkt->data, &rleBytesEncoded, 4);
 
 	// store encoded data
-	memcpy(avpkt->data + PACKET_HEADER_SIZE, mscContext->arithBuff, arithBytesEncoded);
+	memcpy(avpkt->data + PACKET_HEADER_SIZE, mscEncoderContext->arithBuff, arithBytesEncoded);
 	*got_packet_ptr = 1;
 
 	return 0;
 }
 
-void get_blocks(MscEncoderContext *mscContext, const AVFrame *frame, int mb_x, int mb_y) {
+void get_blocks(MscEncoderContext *mscEncoderContext, const AVFrame *frame, int mb_x, int mb_y) {
+	MscCodecContext *mscContext = &mscEncoderContext->mscContext;
     int linesize= frame->linesize[0];
 
     uint8_t *ptr_y = frame->data[0] + (mb_y * 16* linesize          ) + mb_x * 16;
     uint8_t *ptr_u = frame->data[1] + (mb_y * 8 * frame->linesize[1]) + mb_x * 8;
     uint8_t *ptr_v = frame->data[2] + (mb_y * 8 * frame->linesize[2]) + mb_x * 8;
 
-    mscContext->m.dsp.get_pixels(mscContext->block[0], ptr_y                 , linesize);
-    mscContext->m.dsp.get_pixels(mscContext->block[1], ptr_y              + 8, linesize);
-    mscContext->m.dsp.get_pixels(mscContext->block[2], ptr_y + 8*linesize    , linesize);
-    mscContext->m.dsp.get_pixels(mscContext->block[3], ptr_y + 8*linesize + 8, linesize);
+    mscContext->dsp.get_pixels(mscContext->block[0], ptr_y                 , linesize);
+    mscContext->dsp.get_pixels(mscContext->block[1], ptr_y              + 8, linesize);
+    mscContext->dsp.get_pixels(mscContext->block[2], ptr_y + 8*linesize    , linesize);
+    mscContext->dsp.get_pixels(mscContext->block[3], ptr_y + 8*linesize + 8, linesize);
 
-    mscContext->m.dsp.get_pixels(mscContext->block[4], ptr_u, frame->linesize[1]);
-    mscContext->m.dsp.get_pixels(mscContext->block[5], ptr_v, frame->linesize[2]);
+    mscContext->dsp.get_pixels(mscContext->block[4], ptr_u, frame->linesize[1]);
+    mscContext->dsp.get_pixels(mscContext->block[5], ptr_v, frame->linesize[2]);
 }
 
-void put_block(MscDecoderContext *mscContext, AVFrame *frame, int mb_x, int mb_y) {
+void idct_put_block(MscDecoderContext *mscDecoderContext, AVFrame *frame, int mb_x, int mb_y) {
+	MscCodecContext *mscContext = &mscDecoderContext->mscContext;
 	int linesize= frame->linesize[0];
 
 	uint8_t *ptr_y = frame->data[0] + (mb_y * 16* linesize         ) + mb_x * 16;
 	uint8_t *ptr_u = frame->data[1] + (mb_y * 8 * frame->linesize[1]) + mb_x * 8;
 	uint8_t *ptr_v = frame->data[2] + (mb_y * 8 * frame->linesize[2]) + mb_x * 8;
 
-	mscContext->m.dsp.put_pixels_clamped(mscContext->block[0], ptr_y                 , linesize);
-	mscContext->m.dsp.put_pixels_clamped(mscContext->block[1], ptr_y              + 8, linesize);
-	mscContext->m.dsp.put_pixels_clamped(mscContext->block[2], ptr_y + 8*linesize    , linesize);
-	mscContext->m.dsp.put_pixels_clamped(mscContext->block[3], ptr_y + 8*linesize + 8, linesize);
+	mscContext->dsp.idct_put(ptr_y                 , linesize, mscContext->block[0]);
+	mscContext->dsp.idct_put(ptr_y              + 8, linesize, mscContext->block[1]);
+	mscContext->dsp.idct_put(ptr_y + 8*linesize    , linesize, mscContext->block[2]);
+	mscContext->dsp.idct_put(ptr_y + 8*linesize + 8, linesize, mscContext->block[3]);
 
-	mscContext->m.dsp.put_pixels_clamped(mscContext->block[4], ptr_u, frame->linesize[1]);
-	mscContext->m.dsp.put_pixels_clamped(mscContext->block[5], ptr_v, frame->linesize[2]);
+	mscContext->dsp.idct_put(ptr_u                 , frame->linesize[1], mscContext->block[4]);
+	mscContext->dsp.idct_put(ptr_v                 , frame->linesize[2], mscContext->block[5]);
 }
 
 static int encode_close(AVCodecContext *avctx) {
