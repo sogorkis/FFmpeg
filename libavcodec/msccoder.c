@@ -106,7 +106,10 @@ static int decode_init(AVCodecContext *avctx) {
 	ff_init_scantable(mscContext->dsp.idct_permutation, &mscContext->scantable, scantab);
 	avctx->pix_fmt = PIX_FMT_YUV420P;
 
-	mscContext->inv_qscale = 8;
+	if(avctx->extradata_size < 1 || (mscContext->inv_qscale= avctx->extradata[0]) == 0) {
+		av_log(avctx, AV_LOG_ERROR, "illegal qscale 0\n");
+		mscContext->inv_qscale = 8;
+	}
 
 	for(int i = 0; i < 64; i++){
 		int index= scantab[i];
@@ -158,6 +161,11 @@ static int encode_init(AVCodecContext *avctx) {
 		int q= 32*scale*ff_mpeg1_default_intra_matrix[i];
 		mscContext->q_intra_matrix[i]= ((mscContext->inv_qscale << 16) + q/2) / q;
 	}
+
+	avctx->extradata= av_mallocz(8);
+	avctx->extradata_size=8;
+	((uint32_t*)avctx->extradata)[0]= av_le2ne32(mscContext->inv_qscale);
+	((uint32_t*)avctx->extradata)[1]= av_le2ne32(AV_RL32("MSC0"));
 
 	// allocate frame
 	avctx->coded_frame = avcodec_alloc_frame();
