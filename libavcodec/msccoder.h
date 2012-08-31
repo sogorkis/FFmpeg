@@ -11,6 +11,8 @@
 #define PACKET_HEADER_SIZE 4
 
 typedef struct MscCodecContext {
+	MscCoderArithModel lastZeroCodingModel;
+	MscCoderArithModel arithModelIndexCodingModel;
 	MscCoderArithModel arithModels[10];
 	int arithModelAddValue[10];
 

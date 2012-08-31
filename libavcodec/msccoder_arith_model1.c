@@ -35,7 +35,6 @@ void initialize_model( MscCoderArithModel * m, int bits )
 
     for ( i = -1 ; i <= m->length ; i++ )
         m->totals[ i ] = i + 1;
-
 }
 
 /*

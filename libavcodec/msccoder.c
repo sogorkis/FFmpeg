@@ -6,8 +6,9 @@
 #include "libavutil/log.h"
 #include "libavutil/imgutils.h"
 
-const int ARITH_CODER_BITS = 9;
+const int ARITH_CODER_BITS = 8;
 
+/*
 static const uint8_t scantab[64]={
     0x00,0x08,0x01,0x09,0x10,0x18,0x11,0x19,
     0x02,0x0A,0x03,0x0B,0x12,0x1A,0x13,0x1B,
@@ -18,6 +19,19 @@ static const uint8_t scantab[64]={
     0x32,0x3A,0x33,0x3B,0x26,0x2E,0x27,0x2F,
     0x34,0x3C,0x35,0x3D,0x36,0x3E,0x37,0x3F,
 };
+*/
+static const uint8_t *scantab = ff_zigzag_direct;
+
+const uint16_t ff_jpeg_matrix[64] = {
+	16, 11, 10, 16, 24,  40,  51,  61,
+	12, 12, 14, 19, 26,  58,  60,  55,
+	14, 13, 16, 24, 40,  57,  69,  56,
+	14, 17, 22, 29, 51,  87,  80,  62,
+	18, 22, 37, 56, 68,  109, 103, 77,
+	24, 35, 55, 64, 81,  104, 113, 92,
+	49, 64, 78, 87, 103, 121, 120, 101,
+	72, 92, 95, 98, 112, 100, 103, 99
+};
 
 void init_common(AVCodecContext *avctx, MscCodecContext *mscContext) {
 
@@ -26,6 +40,8 @@ void init_common(AVCodecContext *avctx, MscCodecContext *mscContext) {
 	mscContext->mb_width   = (avctx->width  + 15) / 16;
 	mscContext->mb_height  = (avctx->height + 15) / 16;
 
+	initialize_model(&mscContext->arithModelIndexCodingModel, 4);
+	initialize_model(&mscContext->lastZeroCodingModel, 6);
 	/*
 	 * Initialize arithmetic coder models. First model: arithModels[0],
 	 * can store 0, 1 values (2^1). Second one arithModels[1], 0, 1, 2, 3
@@ -37,6 +53,7 @@ void init_common(AVCodecContext *avctx, MscCodecContext *mscContext) {
 	}
 }
 
+/*
 static void print_debug_block(AVCodecContext *avctx, DCTELEM *block) {
 	av_log(avctx, AV_LOG_INFO, "\n ");
 	for (int i = 0; i < 64;) {
@@ -56,13 +73,81 @@ static void print_debug_int(AVCodecContext *avctx, uint16_t * block) {
 		}
 	}
 }
+*/
 
-static int quantize(DCTELEM *block, int *q_intra_matrix) {
+static int get_arith_model_index(int value) {
+	if (value < 4) {
+		return 2;
+	}
+	else if (value < 8) {
+		return 3;
+	}
+	else if (value < 16) {
+		return 4;
+	}
+	else if (value < 32) {
+		return 5;
+	}
+	else if (value < 64) {
+		return 6;
+	}
+	else if (value < 128) {
+		return 7;
+	}
+	else if (value < 256) {
+		return 8;
+	}
+	else if (value < 512) {
+		return 9;
+	}
+	else if (value < 1024) {
+		return 10;
+	}
+	return -1;
+}
+
+static void encode_arith_symbol(MscCoderArithModel *arithModel, PutBitContext *pb, int value) {
+	MscCoderArithSymbol arithSymbol;
+
+	// convert value to range symbol
+	convert_int_to_symbol(arithModel, value, &arithSymbol);
+
+	// encode symbol by arith encoder
+	encode_symbol(pb, &arithSymbol);
+
+	// update arithmetic model
+	update_model(arithModel, value);
+}
+
+static int decode_arith_symbol(MscCoderArithModel *arithModel, GetBitContext *gb) {
+	MscCoderArithSymbol arithSymbol;
+	int count, value;
+
+	// get range symbol
+	get_symbol_scale(arithModel, &arithSymbol);
+
+	// get value for symbol
+	count = get_current_count(&arithSymbol);
+	value = convert_symbol_to_int(arithModel, count, &arithSymbol);
+
+	// remove symbol from stream
+	remove_symbol_from_stream(gb, &arithSymbol);
+
+	// update arithmetic coder model
+	update_model(arithModel, value);
+
+	return value;
+}
+
+static int quantize(DCTELEM *block, int *q_intra_matrix, int *maxAbsElement) {
 	int lastNonZeroElement = -1;
+	*maxAbsElement = 0;
 
 	for (int i = 63; i > 0; --i) {
 		const int index	= scantab[i];
 		block[index]	= (block[index] * q_intra_matrix[index] + (1 << 15)) >> 16;
+
+		*maxAbsElement = FFMAX(*maxAbsElement, FFABS(block[index]));
 
 		if (lastNonZeroElement < 0 && block[index] != 0) {
 			lastNonZeroElement = i;
@@ -71,7 +156,7 @@ static int quantize(DCTELEM *block, int *q_intra_matrix) {
 
 	block[0] = (block[0] + 32) >> 6;
 
-	return lastNonZeroElement;
+	return lastNonZeroElement < 0 ? 0 : lastNonZeroElement;
 }
 
 static void dequantize(DCTELEM *block, MscCodecContext *mscContext) {
@@ -114,10 +199,10 @@ static int decode_init(AVCodecContext *avctx) {
 	for(int i = 0; i < 64; i++){
 		int index= scantab[i];
 
-		mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_intra_matrix[index] / mscContext->inv_qscale;
+//		mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_intra_matrix[index] / mscContext->inv_qscale;
+//		mscContext->intra_matrix[i]= 64 * scale * ff_jpeg_matrix[index] / mscContext->inv_qscale;
+		mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_non_intra_matrix[index] / mscContext->inv_qscale;
 	}
-
-	print_debug_int(avctx, mscContext->intra_matrix);
 
 	// allocate frame
 	p = avctx->coded_frame = avcodec_alloc_frame();
@@ -158,7 +243,9 @@ static int encode_init(AVCodecContext *avctx) {
 	mscContext->inv_qscale = (32*scale*FF_QUALITY_SCALE +  avctx->global_quality/2) / avctx->global_quality;
 
 	for(int i = 0; i < 64; i++) {
-		int q= 32*scale*ff_mpeg1_default_intra_matrix[i];
+//		int q= 32*scale * ff_mpeg1_default_intra_matrix[i];
+//		int q= 32*scale * ff_jpeg_matrix[i];
+		int q= 32*scale * ff_mpeg1_default_non_intra_matrix[i];
 		mscContext->q_intra_matrix[i]= ((mscContext->inv_qscale << 16) + q/2) / q;
 	}
 
@@ -194,8 +281,7 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 	MscDecoderContext * mscDecoderContext;
 	MscCodecContext * mscContext;
 	GetBitContext gb;
-	MscCoderArithSymbol arithSymbol;
-	uint32_t count, value;
+	int lastNonZero, value, arithCoderIndex;
 
 	mscDecoderContext = avctx->priv_data;
 	mscContext = &mscDecoderContext->mscContext;
@@ -226,42 +312,38 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 
 			for (int n = 0; n < 6; ++n) {
 
-				for (int i = 0; i < 64; ++i) {
-					// get range symbol
-					get_symbol_scale(&mscContext->arithModels[ARITH_CODER_BITS], &arithSymbol);
+				mscContext->dsp.clear_block(mscContext->block[n]);
 
-					// get value for symbol
-					count = get_current_count(&arithSymbol);
-					value = convert_symbol_to_int(&mscContext->arithModels[ARITH_CODER_BITS], count, &arithSymbol);
+				arithCoderIndex = decode_arith_symbol(&mscContext->arithModelIndexCodingModel, &gb);
+				lastNonZero = decode_arith_symbol(&mscContext->lastZeroCodingModel, &gb);
 
-					// remove symbol from stream
-					remove_symbol_from_stream(&gb, &arithSymbol);
+				for (int i = 0; i <= lastNonZero; ++i) {
+					int arithCoderBits = i == 0 ? ARITH_CODER_BITS : arithCoderIndex;
 
-					// update arithmetic coder model
-					update_model(&mscContext->arithModels[ARITH_CODER_BITS], value);
+					value = decode_arith_symbol(&mscContext->arithModels[arithCoderBits], &gb);
 
-					mscContext->block[n][i] = value - mscContext->arithModelAddValue[ARITH_CODER_BITS];
+					mscContext->block[n][scantab[i]] = value - mscContext->arithModelAddValue[arithCoderBits];
 				}
 
-				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-					av_log(avctx, AV_LOG_INFO, "Quantized x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
-					print_debug_block(avctx, mscContext->block[n]);
-				}
+//				if (avctx->frame_number == 0 && mb_x == 3 && mb_y == 0) {
+//					av_log(avctx, AV_LOG_INFO, "Quantized x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+//					print_debug_block(avctx, mscContext->block[n]);
+//				}
 
 				dequantize(mscContext->block[n], mscContext);
 
-				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-					av_log(avctx, AV_LOG_INFO, "Dequantized x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
-					print_debug_block(avctx, mscContext->block[n]);
-				}
+//				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+//					av_log(avctx, AV_LOG_INFO, "Dequantized x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+//					print_debug_block(avctx, mscContext->block[n]);
+//				}
 			}
 
 			idct_put_block(mscDecoderContext, frame, mb_x, mb_y);
 
-			if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-				av_log(avctx, AV_LOG_INFO, "IDCT x=%d, y=%d, n=%d\n", mb_x, mb_y, 0);
-				print_debug_block(avctx, mscContext->block[0]);
-			}
+//			if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+//				av_log(avctx, AV_LOG_INFO, "IDCT x=%d, y=%d, n=%d\n", mb_x, mb_y, 0);
+//				print_debug_block(avctx, mscContext->block[0]);
+//			}
 		}
 	}
 
@@ -292,8 +374,7 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 	uint32_t rleBytesEncoded, arithBytesEncoded;
 	int retCode;
 	PutBitContext pb;
-	int mb_y, mb_x, value;
-	MscCoderArithSymbol arithSymbol;
+	int mb_y, mb_x, value, lastNonZero, max, arithCoderIndex;
 
 	// initialize arithmetic encoder registers
 	initialize_arithmetic_encoder();
@@ -313,19 +394,23 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 
 			for (int n = 0; n < 6; ++n) {
 
-				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-					av_log(avctx, AV_LOG_INFO, "Block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
-					print_debug_block(avctx, mscContext->block[n]);
-				}
+//				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+//					av_log(avctx, AV_LOG_INFO, "Block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+//					print_debug_block(avctx, mscContext->block[n]);
+//				}
 
 				mscContext->dsp.fdct(mscContext->block[n]);
 
-				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-					av_log(avctx, AV_LOG_INFO, "DCT block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
-					print_debug_block(avctx, mscContext->block[n]);
-				}
+//				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+//					av_log(avctx, AV_LOG_INFO, "DCT block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+//					print_debug_block(avctx, mscContext->block[n]);
+//				}
 
-				quantize(mscContext->block[n], mscContext->q_intra_matrix);
+				lastNonZero = quantize(mscContext->block[n], mscContext->q_intra_matrix, &max);
+
+				arithCoderIndex = get_arith_model_index(max);
+
+				av_assert1(lastNonZero < 64);
 
 //				if (overflow) {
 //					clip_coeffs(m, m->block[n], m->block_last_index[n]);
@@ -333,23 +418,20 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 //							avctx->frame_number, mb_x, mb_y, n);
 //				}
 
-				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
-					av_log(avctx, AV_LOG_INFO, "DCT quantized block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
-					print_debug_block(avctx, mscContext->block[n]);
-				}
+//				if (avctx->frame_number == 0 && mb_x == 3 && mb_y == 0) {
+//					av_log(avctx, AV_LOG_INFO, "DCT quantized block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
+//					print_debug_block(avctx, mscContext->block[n]);
+//				}
 
-				//TODO: encode to last non zero coefficient
-				for (int i = 0; i < 64; ++i) {
-					value = mscContext->block[n][i] + mscContext->arithModelAddValue[ARITH_CODER_BITS];
+				encode_arith_symbol(&mscContext->arithModelIndexCodingModel, &pb, arithCoderIndex);
+				encode_arith_symbol(&mscContext->lastZeroCodingModel, &pb, lastNonZero);
 
-					// convert value to range symbol
-					convert_int_to_symbol(&mscContext->arithModels[ARITH_CODER_BITS], value, &arithSymbol);
+				for (int i = 0; i <= lastNonZero; ++i) {
+					int arithCoderBits = i == 0 ? ARITH_CODER_BITS : arithCoderIndex;
 
-					// encode symbol by arith encoder
-					encode_symbol(&pb, &arithSymbol);
+					value = mscContext->block[n][scantab[i]] + mscContext->arithModelAddValue[arithCoderBits];
 
-					// update arithmetic model
-					update_model(&mscContext->arithModels[ARITH_CODER_BITS], value);
+			        encode_arith_symbol(&mscContext->arithModels[arithCoderBits], &pb, value);
 				}
 			}
 		}
