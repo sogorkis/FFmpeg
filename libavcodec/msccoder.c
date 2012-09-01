@@ -51,6 +51,15 @@ void init_common(AVCodecContext *avctx, MscCodecContext *mscContext) {
 		initialize_model(&mscContext->arithModels[i], i + 1);
 		mscContext->arithModelAddValue[i] = pow(2, i) - 1;
 	}
+
+	mscContext->referenceFrame = avcodec_alloc_frame();
+	if (!mscContext->referenceFrame) {
+		av_log(avctx, AV_LOG_ERROR, "Could not allocate frame.\n");
+	}
+}
+
+static int isKeyFrame(int frameIndex) {
+	return frameIndex % 25 == 0;
 }
 
 /*
@@ -216,15 +225,6 @@ static int decode_init(AVCodecContext *avctx) {
 	p->quality		= (32 * scale + mscContext->inv_qscale / 2) / mscContext->inv_qscale;
 	memset(p->qscale_table, p->quality, p->qstride * mscContext->mb_height);
 
-	// allocate buffer
-	mscDecoderContext->buffSize	= 6 * avctx->coded_width * avctx->coded_height;
-	mscDecoderContext->buff		= av_malloc(mscDecoderContext->buffSize);
-
-	if (!mscDecoderContext->buff) {
-		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
-		return AVERROR(ENOMEM);
-	}
-
 	return 0;
 }
 
@@ -254,6 +254,13 @@ static int encode_init(AVCodecContext *avctx) {
 	((uint32_t*)avctx->extradata)[0]= av_le2ne32(mscContext->inv_qscale);
 	((uint32_t*)avctx->extradata)[1]= av_le2ne32(AV_RL32("MSC0"));
 
+	//check TODO
+	ff_init_scantable(mscContext->dsp.idct_permutation, &mscContext->scantable, scantab);
+	for(int i = 0; i < 64; i++){
+			int index= scantab[i];
+			mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_non_intra_matrix[index] / mscContext->inv_qscale;
+		}
+
 	// allocate frame
 	avctx->coded_frame = avcodec_alloc_frame();
 	if (!avctx->coded_frame) {
@@ -262,13 +269,11 @@ static int encode_init(AVCodecContext *avctx) {
 	}
 
 	// allocate buffers
-	mscEncoderContext->rleBuffSize		= 3 * avctx->coded_width;
 	mscEncoderContext->arithBuffSize	= 6 * avctx->coded_width * avctx->coded_height;
-	mscEncoderContext->rleBuff			= av_malloc(mscEncoderContext->rleBuffSize);
 	mscEncoderContext->arithBuff		= av_malloc(mscEncoderContext->arithBuffSize);
 
-	if (mscEncoderContext->rleBuff == NULL || mscEncoderContext->arithBuff == NULL) {
-		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffers.\n");
+	if (mscEncoderContext->arithBuff == NULL) {
+		av_log(avctx, AV_LOG_ERROR, "Could not allocate buffer.\n");
 		return AVERROR(ENOMEM);
 	}
 
@@ -277,11 +282,10 @@ static int encode_init(AVCodecContext *avctx) {
 
 static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPacket *avpkt) {
 	AVFrame *frame = avctx->coded_frame;
-	uint32_t rleBytesEncoded;
 	MscDecoderContext * mscDecoderContext;
 	MscCodecContext * mscContext;
 	GetBitContext gb;
-	int lastNonZero, value, arithCoderIndex;
+	int lastNonZero, value, arithCoderIndex = -1, keyFrame;
 
 	mscDecoderContext = avctx->priv_data;
 	mscContext = &mscDecoderContext->mscContext;
@@ -296,14 +300,22 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 		return AVERROR(ENOMEM);
 	}
 
+	keyFrame = isKeyFrame(avctx->frame_number);
+
+	if (avctx->frame_number == 0) {
+		av_image_alloc(mscContext->referenceFrame->data, mscContext->referenceFrame->linesize, frame->width, frame->height, PIX_FMT_YUV420P, 128);
+	}
+
+	if (!keyFrame) {
+		av_image_copy(frame->data, frame->linesize, mscContext->referenceFrame->data,
+				mscContext->referenceFrame->linesize, PIX_FMT_YUV420P, frame->width, frame->height);
+	}
+
 	frame->key_frame = 1;
 	frame->pict_type = AV_PICTURE_TYPE_I;
 
-	// read header
-	memcpy(&rleBytesEncoded, avpkt->data, 4);
-
 	// init encoded data bit buffer
-	init_get_bits(&gb, avpkt->data + PACKET_HEADER_SIZE, (avpkt->size - PACKET_HEADER_SIZE) * 8);
+	init_get_bits(&gb, avpkt->data, avpkt->size * 8);
 
 	initialize_arithmetic_decoder(&gb);
 
@@ -314,8 +326,11 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 
 				mscContext->dsp.clear_block(mscContext->block[n]);
 
-				arithCoderIndex = decode_arith_symbol(&mscContext->arithModelIndexCodingModel, &gb);
 				lastNonZero = decode_arith_symbol(&mscContext->lastZeroCodingModel, &gb);
+
+				if (lastNonZero > 0) {
+					arithCoderIndex = decode_arith_symbol(&mscContext->arithModelIndexCodingModel, &gb);
+				}
 
 				for (int i = 0; i <= lastNonZero; ++i) {
 					int arithCoderBits = i == 0 ? ARITH_CODER_BITS : arithCoderIndex;
@@ -338,12 +353,18 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 //				}
 			}
 
-			idct_put_block(mscDecoderContext, frame, mb_x, mb_y);
-
 //			if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
 //				av_log(avctx, AV_LOG_INFO, "IDCT x=%d, y=%d, n=%d\n", mb_x, mb_y, 0);
 //				print_debug_block(avctx, mscContext->block[0]);
 //			}
+			if (keyFrame) {
+				idct_put_block(mscContext, frame, mb_x, mb_y);
+			}
+			else {
+				idct_add_block(mscContext, frame, mb_x, mb_y);
+			}
+
+			copy_macroblock(frame, mscContext->referenceFrame, mb_x, mb_y);
 		}
 	}
 
@@ -356,14 +377,10 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 }
 
 static int decode_close(AVCodecContext *avctx) {
-	MscDecoderContext * mscContext;
-	mscContext = avctx->priv_data;
-
 	if (avctx->coded_frame->data[0])
 		avctx->release_buffer(avctx, avctx->coded_frame);
 
 //	av_freep(&avctx->coded_frame);
-	av_freep(&mscContext->buff);
 
 	return 0;
 }
@@ -371,10 +388,9 @@ static int decode_close(AVCodecContext *avctx) {
 static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *frame, int *got_packet_ptr) {
 	MscEncoderContext * mscEncoderContext;
 	MscCodecContext * mscContext;
-	uint32_t rleBytesEncoded, arithBytesEncoded;
-	int retCode;
+	uint32_t arithBytesEncoded;
 	PutBitContext pb;
-	int mb_y, mb_x, value, lastNonZero, max, arithCoderIndex;
+	int mb_y, mb_x, value, lastNonZero, max, arithCoderIndex = -1, keyFrame;
 
 	// initialize arithmetic encoder registers
 	initialize_arithmetic_encoder();
@@ -384,17 +400,29 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 
 	init_put_bits(&pb, mscEncoderContext->arithBuff, mscEncoderContext->arithBuffSize);
 
+	keyFrame = isKeyFrame(avctx->frame_number);
+
+	if (avctx->frame_number == 0) {
+		av_image_alloc(mscContext->referenceFrame->data, mscContext->referenceFrame->linesize, frame->width, frame->height, frame->format, 128);
+	}
+
 	avctx->coded_frame->reference = 0;
 	avctx->coded_frame->key_frame = 1;
 	avctx->coded_frame->pict_type = AV_PICTURE_TYPE_I;
 
 	for (mb_x = 0; mb_x < mscContext->mb_width; mb_x++) {
 		for (mb_y = 0; mb_y < mscContext->mb_height; mb_y++) {
-			get_blocks(mscEncoderContext, frame, mb_x, mb_y);
+			get_blocks(mscEncoderContext, frame, mb_x, mb_y, mscContext->block);
+
+			if (!keyFrame) {
+				get_blocks(mscEncoderContext, mscContext->referenceFrame, mb_x, mb_y, mscContext->tmpBlock);
+
+				diff_blocks(mscContext->block, mscContext->tmpBlock);
+			}
 
 			for (int n = 0; n < 6; ++n) {
 
-//				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
+//				if (avctx->frame_number == 1 && mb_x == 0 && mb_y == 0) {
 //					av_log(avctx, AV_LOG_INFO, "Block x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
 //					print_debug_block(avctx, mscContext->block[n]);
 //				}
@@ -407,8 +435,6 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 //				}
 
 				lastNonZero = quantize(mscContext->block[n], mscContext->q_intra_matrix, &max);
-
-				arithCoderIndex = get_arith_model_index(max);
 
 				av_assert1(lastNonZero < 64);
 
@@ -423,8 +449,13 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 //					print_debug_block(avctx, mscContext->block[n]);
 //				}
 
-				encode_arith_symbol(&mscContext->arithModelIndexCodingModel, &pb, arithCoderIndex);
 				encode_arith_symbol(&mscContext->lastZeroCodingModel, &pb, lastNonZero);
+
+				if (lastNonZero > 0) {
+					arithCoderIndex = get_arith_model_index(max);
+
+					encode_arith_symbol(&mscContext->arithModelIndexCodingModel, &pb, arithCoderIndex);
+				}
 
 				for (int i = 0; i <= lastNonZero; ++i) {
 					int arithCoderBits = i == 0 ? ARITH_CODER_BITS : arithCoderIndex;
@@ -433,6 +464,15 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 
 			        encode_arith_symbol(&mscContext->arithModels[arithCoderBits], &pb, value);
 				}
+
+				dequantize(mscContext->block[n], mscContext);
+			}
+
+			if (keyFrame) {
+				idct_put_block(mscContext, mscContext->referenceFrame, mb_x, mb_y);
+			}
+			else {
+				idct_add_block(mscContext, mscContext->referenceFrame, mb_x, mb_y);
 			}
 		}
 	}
@@ -446,23 +486,20 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 	arithBytesEncoded = pb.buf_ptr - pb.buf;
 
 	// alocate packet
-	if ((retCode = ff_alloc_packet(avpkt, arithBytesEncoded + PACKET_HEADER_SIZE)) < 0) {
-		return retCode;
+	if ((value = ff_alloc_packet(avpkt, arithBytesEncoded)) < 0) {
+		return value;
 	}
 
 	avpkt->flags |= AV_PKT_FLAG_KEY;
 
-	// store header data
-	memcpy(avpkt->data, &rleBytesEncoded, 4);
-
 	// store encoded data
-	memcpy(avpkt->data + PACKET_HEADER_SIZE, mscEncoderContext->arithBuff, arithBytesEncoded);
+	memcpy(avpkt->data, mscEncoderContext->arithBuff, arithBytesEncoded);
 	*got_packet_ptr = 1;
 
 	return 0;
 }
 
-void get_blocks(MscEncoderContext *mscEncoderContext, const AVFrame *frame, int mb_x, int mb_y) {
+void get_blocks(MscEncoderContext *mscEncoderContext, const AVFrame *frame, int mb_x, int mb_y, DCTELEM block[6][64]) {
 	MscCodecContext *mscContext = &mscEncoderContext->mscContext;
     int linesize= frame->linesize[0];
 
@@ -470,17 +507,16 @@ void get_blocks(MscEncoderContext *mscEncoderContext, const AVFrame *frame, int 
     uint8_t *ptr_u = frame->data[1] + (mb_y * 8 * frame->linesize[1]) + mb_x * 8;
     uint8_t *ptr_v = frame->data[2] + (mb_y * 8 * frame->linesize[2]) + mb_x * 8;
 
-    mscContext->dsp.get_pixels(mscContext->block[0], ptr_y                 , linesize);
-    mscContext->dsp.get_pixels(mscContext->block[1], ptr_y              + 8, linesize);
-    mscContext->dsp.get_pixels(mscContext->block[2], ptr_y + 8*linesize    , linesize);
-    mscContext->dsp.get_pixels(mscContext->block[3], ptr_y + 8*linesize + 8, linesize);
+    mscContext->dsp.get_pixels(block[0], ptr_y                 , linesize);
+    mscContext->dsp.get_pixels(block[1], ptr_y              + 8, linesize);
+    mscContext->dsp.get_pixels(block[2], ptr_y + 8*linesize    , linesize);
+    mscContext->dsp.get_pixels(block[3], ptr_y + 8*linesize + 8, linesize);
 
-    mscContext->dsp.get_pixels(mscContext->block[4], ptr_u, frame->linesize[1]);
-    mscContext->dsp.get_pixels(mscContext->block[5], ptr_v, frame->linesize[2]);
+    mscContext->dsp.get_pixels(block[4], ptr_u, frame->linesize[1]);
+    mscContext->dsp.get_pixels(block[5], ptr_v, frame->linesize[2]);
 }
 
-void idct_put_block(MscDecoderContext *mscDecoderContext, AVFrame *frame, int mb_x, int mb_y) {
-	MscCodecContext *mscContext = &mscDecoderContext->mscContext;
+void idct_put_block(MscCodecContext *mscContext, AVFrame *frame, int mb_x, int mb_y) {
 	int linesize= frame->linesize[0];
 
 	uint8_t *ptr_y = frame->data[0] + (mb_y * 16* linesize         ) + mb_x * 16;
@@ -496,13 +532,58 @@ void idct_put_block(MscDecoderContext *mscDecoderContext, AVFrame *frame, int mb
 	mscContext->dsp.idct_put(ptr_v                 , frame->linesize[2], mscContext->block[5]);
 }
 
+void idct_add_block(MscCodecContext *mscContext, AVFrame *frame, int mb_x, int mb_y) {
+	int linesize= frame->linesize[0];
+
+	uint8_t *ptr_y = frame->data[0] + (mb_y * 16* linesize         ) + mb_x * 16;
+	uint8_t *ptr_u = frame->data[1] + (mb_y * 8 * frame->linesize[1]) + mb_x * 8;
+	uint8_t *ptr_v = frame->data[2] + (mb_y * 8 * frame->linesize[2]) + mb_x * 8;
+
+	mscContext->dsp.idct_add(ptr_y                 , linesize, mscContext->block[0]);
+	mscContext->dsp.idct_add(ptr_y              + 8, linesize, mscContext->block[1]);
+	mscContext->dsp.idct_add(ptr_y + 8*linesize    , linesize, mscContext->block[2]);
+	mscContext->dsp.idct_add(ptr_y + 8*linesize + 8, linesize, mscContext->block[3]);
+
+	mscContext->dsp.idct_add(ptr_u                 , frame->linesize[1], mscContext->block[4]);
+	mscContext->dsp.idct_add(ptr_v                 , frame->linesize[2], mscContext->block[5]);
+}
+
+void diff_blocks(DCTELEM block[6][64], DCTELEM referenceBlock[6][64]) {
+	for (int i = 0; i < 6; ++i) {
+		for (int j = 0; j < 64; ++j) {
+//			block[i][j] = referenceBlock[i][j] - block[i][j];
+			block[i][j] -= referenceBlock[i][j];
+		}
+	}
+}
+
+void copy_macroblock(const AVFrame *src, AVFrame *dst, int mb_x, int mb_y) {
+	int linesize_src = src->linesize[0];
+	int linesize_dst = dst->linesize[0];
+
+	const uint8_t *ptr_y_src = src->data[0] + (mb_y * 16* linesize_src    ) + mb_x * 16;
+	const uint8_t *ptr_u_src = src->data[1] + (mb_y * 8 * src->linesize[1]) + mb_x * 8;
+	const uint8_t *ptr_v_src = src->data[2] + (mb_y * 8 * src->linesize[2]) + mb_x * 8;
+
+	uint8_t *ptr_y_dst = dst->data[0] + (mb_y * 16* linesize_dst    ) + mb_x * 16;
+	uint8_t *ptr_u_dst = dst->data[1] + (mb_y * 8 * dst->linesize[1]) + mb_x * 8;
+	uint8_t *ptr_v_dst = dst->data[2] + (mb_y * 8 * dst->linesize[2]) + mb_x * 8;
+
+	copy_block8(ptr_y_dst                     , ptr_y_src                     , linesize_dst, linesize_src, 8);
+	copy_block8(ptr_y_dst                  + 8, ptr_y_src                  + 8, linesize_dst, linesize_src, 8);
+	copy_block8(ptr_y_dst + 8*linesize_dst    , ptr_y_src + 8*linesize_src    , linesize_dst, linesize_src, 8);
+	copy_block8(ptr_y_dst + 8*linesize_dst + 8, ptr_y_src + 8*linesize_src + 8, linesize_dst, linesize_src, 8);
+
+	copy_block8(ptr_u_dst, ptr_u_src, dst->linesize[1], src->linesize[1], 8);
+	copy_block8(ptr_v_dst, ptr_v_src, dst->linesize[2], src->linesize[2], 8);
+}
+
 static int encode_close(AVCodecContext *avctx) {
 	MscEncoderContext * mscContext;
 
 	mscContext = avctx->priv_data;
 
 //	av_freep(&avctx->coded_frame);
-	av_freep(&mscContext->rleBuff);
 	av_freep(&mscContext->arithBuff);
 
 	return 0;
