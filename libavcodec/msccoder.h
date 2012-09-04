@@ -18,7 +18,9 @@ typedef struct MscCodecContext {
 
 	ScanTable scantable;
 	uint16_t intra_matrix[64];
+	uint16_t non_intra_matrix[64];
 	int q_intra_matrix[64];
+	int q_non_intra_matrix[64];
 
 	int inv_qscale;
 
@@ -38,8 +40,6 @@ typedef struct MscEncoderContext {
 
 	uint8_t *arithBuff;
 	size_t arithBuffSize;
-//	uint8_t *rleBuff, *arithBuff;
-//	size_t rleBuffSize, arithBuffSize;
 } MscEncoderContext;
 
 void init_common(AVCodecContext *avctx, MscCodecContext *mscContext);

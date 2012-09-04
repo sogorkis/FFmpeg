@@ -8,20 +8,6 @@
 
 const int ARITH_CODER_BITS = 8;
 
-/*
-static const uint8_t scantab[64]={
-    0x00,0x08,0x01,0x09,0x10,0x18,0x11,0x19,
-    0x02,0x0A,0x03,0x0B,0x12,0x1A,0x13,0x1B,
-    0x04,0x0C,0x05,0x0D,0x20,0x28,0x21,0x29,
-    0x06,0x0E,0x07,0x0F,0x14,0x1C,0x15,0x1D,
-    0x22,0x2A,0x23,0x2B,0x30,0x38,0x31,0x39,
-    0x16,0x1E,0x17,0x1F,0x24,0x2C,0x25,0x2D,
-    0x32,0x3A,0x33,0x3B,0x26,0x2E,0x27,0x2F,
-    0x34,0x3C,0x35,0x3D,0x36,0x3E,0x37,0x3F,
-};
-*/
-static const uint8_t *scantab = ff_zigzag_direct;
-
 const uint16_t ff_jpeg_matrix[64] = {
 	16, 11, 10, 16, 24,  40,  51,  61,
 	12, 12, 14, 19, 26,  58,  60,  55,
@@ -32,6 +18,37 @@ const uint16_t ff_jpeg_matrix[64] = {
 	49, 64, 78, 87, 103, 121, 120, 101,
 	72, 92, 95, 98, 112, 100, 103, 99
 };
+
+const uint8_t ff_scan_row[64] = {
+	 0,  1,  2,  3,  4,  5,  6,  7,
+	 8,  9, 10, 11, 12, 13, 14, 15,
+	16, 17, 18, 19, 20, 21, 22, 23,
+	24, 25, 26, 27, 28, 29, 30, 31,
+	32, 33, 34, 35, 36, 37, 38, 39,
+	40, 41, 42, 43, 44, 45, 46, 47,
+	48, 49, 50, 51, 52, 53, 54, 55,
+	56, 57, 58, 59, 60, 61, 62, 63
+};
+
+const uint8_t ff_scan_column[64] = {
+	 0,  8, 16, 24, 32, 40, 48, 56,
+	 1,  9, 17, 25, 33, 41, 49, 57,
+	 2, 10, 18, 26, 34, 42, 50, 58,
+	 3, 11, 19, 27, 35, 43, 51, 59,
+	 4, 12, 20, 28, 36, 44, 52, 60,
+	 5, 13, 21, 29, 37, 45, 53, 61,
+	 6, 14, 22, 30, 38, 46, 54, 62,
+	 7, 15, 23, 31, 39, 47, 55, 63
+};
+
+//const uint16_t * quant_intra_matrix = ff_mpeg1_default_intra_matrix;
+const uint16_t * quant_intra_matrix = ff_jpeg_matrix;
+//const uint16_t * quant_intra_matrix = ff_mpeg1_default_non_intra_matrix;;
+
+//static const uint8_t *scantab = ff_scan_row;
+//static const uint8_t *scantab = ff_scan_column;
+static const uint8_t *scantab = ff_zigzag_direct;
+//static const uint8_t *scantab = ff_alternate_vertical_scan;
 
 void init_common(AVCodecContext *avctx, MscCodecContext *mscContext) {
 
@@ -168,16 +185,17 @@ static int quantize(DCTELEM *block, int *q_intra_matrix, int *maxAbsElement) {
 	return lastNonZeroElement < 0 ? 0 : lastNonZeroElement;
 }
 
-static void dequantize(DCTELEM *block, MscCodecContext *mscContext) {
+static void dequantize(DCTELEM *block, MscCodecContext *mscContext, int intraMatrix) {
 	DECLARE_ALIGNED(16, DCTELEM, tmp)[64];
 	DCTELEM firstElemValue;
+	uint16_t *qmatrix = intraMatrix ? mscContext->intra_matrix : mscContext->non_intra_matrix;
 
 	firstElemValue = 8 * block[0];
 	block[0] = 0;
 
 	for (int i = 0; i < 64; ++i) {
 		const int index	= scantab[i];
-		tmp[mscContext->scantable.permutated[i]]= (block[index] * mscContext->intra_matrix[i]) >> 4;
+		tmp[mscContext->scantable.permutated[i]]= (block[index] * qmatrix[i]) >> 4;
 	}
 
 	tmp[0] = firstElemValue;
@@ -208,9 +226,8 @@ static int decode_init(AVCodecContext *avctx) {
 	for(int i = 0; i < 64; i++){
 		int index= scantab[i];
 
-//		mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_intra_matrix[index] / mscContext->inv_qscale;
-//		mscContext->intra_matrix[i]= 64 * scale * ff_jpeg_matrix[index] / mscContext->inv_qscale;
-		mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_non_intra_matrix[index] / mscContext->inv_qscale;
+		mscContext->intra_matrix[i]= 64 * scale * quant_intra_matrix[index] / mscContext->inv_qscale;
+		mscContext->non_intra_matrix[i]= 64 * scale * ff_mpeg1_default_non_intra_matrix[index] / mscContext->inv_qscale;
 	}
 
 	// allocate frame
@@ -243,10 +260,10 @@ static int encode_init(AVCodecContext *avctx) {
 	mscContext->inv_qscale = (32*scale*FF_QUALITY_SCALE +  avctx->global_quality/2) / avctx->global_quality;
 
 	for(int i = 0; i < 64; i++) {
-//		int q= 32*scale * ff_mpeg1_default_intra_matrix[i];
-//		int q= 32*scale * ff_jpeg_matrix[i];
-		int q= 32*scale * ff_mpeg1_default_non_intra_matrix[i];
+		int q= 32*scale * quant_intra_matrix[i];
+		int qNonIntra= 32*scale * ff_mpeg1_default_non_intra_matrix[i];
 		mscContext->q_intra_matrix[i]= ((mscContext->inv_qscale << 16) + q/2) / q;
+		mscContext->q_non_intra_matrix[i]= ((mscContext->inv_qscale << 16) + qNonIntra/2) / qNonIntra;
 	}
 
 	avctx->extradata= av_mallocz(8);
@@ -258,7 +275,8 @@ static int encode_init(AVCodecContext *avctx) {
 	ff_init_scantable(mscContext->dsp.idct_permutation, &mscContext->scantable, scantab);
 	for(int i = 0; i < 64; i++){
 			int index= scantab[i];
-			mscContext->intra_matrix[i]= 64 * scale * ff_mpeg1_default_non_intra_matrix[index] / mscContext->inv_qscale;
+			mscContext->intra_matrix[i]= 64 * scale * quant_intra_matrix[index] / mscContext->inv_qscale;
+			mscContext->non_intra_matrix[i]= 64 * scale * ff_mpeg1_default_non_intra_matrix[index] / mscContext->inv_qscale;
 		}
 
 	// allocate frame
@@ -345,7 +363,7 @@ static int decode(AVCodecContext * avctx, void *outdata, int *outdata_size, AVPa
 //					print_debug_block(avctx, mscContext->block[n]);
 //				}
 
-				dequantize(mscContext->block[n], mscContext);
+				dequantize(mscContext->block[n], mscContext, keyFrame);
 
 //				if (avctx->frame_number == 0 && mb_x == 0 && mb_y == 0) {
 //					av_log(avctx, AV_LOG_INFO, "Dequantized x=%d, y=%d, n=%d\n", mb_x, mb_y, n);
@@ -410,6 +428,8 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 	avctx->coded_frame->key_frame = 1;
 	avctx->coded_frame->pict_type = AV_PICTURE_TYPE_I;
 
+	int * qmatrix = keyFrame ? mscContext->q_intra_matrix : mscContext->q_non_intra_matrix;
+
 	for (mb_x = 0; mb_x < mscContext->mb_width; mb_x++) {
 		for (mb_y = 0; mb_y < mscContext->mb_height; mb_y++) {
 			get_blocks(mscEncoderContext, frame, mb_x, mb_y, mscContext->block);
@@ -434,7 +454,7 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 //					print_debug_block(avctx, mscContext->block[n]);
 //				}
 
-				lastNonZero = quantize(mscContext->block[n], mscContext->q_intra_matrix, &max);
+				lastNonZero = quantize(mscContext->block[n], qmatrix, &max);
 
 				av_assert1(lastNonZero < 64);
 
@@ -465,7 +485,7 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *avpkt,	const AVFrame *f
 			        encode_arith_symbol(&mscContext->arithModels[arithCoderBits], &pb, value);
 				}
 
-				dequantize(mscContext->block[n], mscContext);
+				dequantize(mscContext->block[n], mscContext, keyFrame);
 			}
 
 			if (keyFrame) {
@@ -551,7 +571,6 @@ void idct_add_block(MscCodecContext *mscContext, AVFrame *frame, int mb_x, int m
 void diff_blocks(DCTELEM block[6][64], DCTELEM referenceBlock[6][64]) {
 	for (int i = 0; i < 6; ++i) {
 		for (int j = 0; j < 64; ++j) {
-//			block[i][j] = referenceBlock[i][j] - block[i][j];
 			block[i][j] -= referenceBlock[i][j];
 		}
 	}
